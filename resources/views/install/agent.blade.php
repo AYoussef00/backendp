@@ -200,11 +200,16 @@ JSON
 }
 
 parse_job() {
-  # Pass JSON via env so heredoc stdin cannot swallow the payload.
-  JOB_JSON="${1:-{}}" python3 - <<'PY' 2>/dev/null || true
-import json, os
-raw = os.environ.get("JOB_JSON") or "{}"
+  local tmp out
+  tmp="$(mktemp)"
+  out="$(mktemp)"
+  printf '%s' "${1:-{}}" > "${tmp}"
+  python3 - "${tmp}" > "${out}" 2>/dev/null <<'PY' || true
+import json, sys
+path = sys.argv[1]
 try:
+    with open(path, "r", encoding="utf-8") as fh:
+        raw = fh.read().strip() or "{}"
     data = json.loads(raw)
 except Exception:
     print("")
@@ -221,6 +226,8 @@ else:
     print(job.get("type") or "")
     print(json.dumps(job.get("payload") or {}, separators=(",", ":")))
 PY
+  cat "${out}"
+  rm -f "${tmp}" "${out}"
 }
 
 json_err() {
@@ -375,24 +382,25 @@ case "${cmd}" in
     while true; do
       set +e
       loop=$((loop + 1))
-      if (( loop % 2 == 1 )); then
-        api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null
-      fi
-      if (( loop % 6 == 0 )); then
-        api POST /api/agent/v1/metrics "$(metrics_payload)" >/dev/null
-      fi
+
+      # Claim jobs first — interactive actions must not wait on heartbeats.
       job_json="$(api GET /api/agent/v1/jobs)"
       api_rc=$?
       if [[ ${api_rc} -ne 0 || -z "${job_json}" ]]; then
+        if (( loop % 10 == 0 )); then
+          log "jobs poll failed rc=${api_rc}"
+        fi
         job_json='{}'
       fi
       job_meta="$(parse_job "${job_json}")"
       job_id="$(printf '%s' "${job_meta}" | sed -n '1p')"
       job_type="$(printf '%s' "${job_meta}" | sed -n '2p')"
       job_payload="$(printf '%s' "${job_meta}" | sed -n '3p')"
-      if (( loop % 10 == 0 )); then
-        log "alive loop=${loop}"
+
+      if [[ -z "${job_id}" ]] && printf '%s' "${job_json}" | grep -q '"type"'; then
+        log "parse_job missed payload bytes=${#job_json}"
       fi
+
       if [[ -n "${job_id}" ]]; then
         log "claimed job id=${job_id} type=${job_type}"
         result_json='{"success":false,"error":{"code":"OPERATION_FAILED","message":"handler produced no result"}}'
@@ -421,13 +429,26 @@ case "${cmd}" in
         if api POST "/api/agent/v1/jobs/${job_id}/result" "${result_json}" >/dev/null; then
           log "result posted id=${job_id} type=${job_type}"
         else
-          log "result post failed id=${job_id} type=${job_type}"
+          log "result post failed id=${job_id} type=${job_type} body=${result_json:0:200}"
         fi
         case "${job_type}" in
           website_*)
             ( api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || true ) &
             ;;
         esac
+        set -e
+        sleep 0.2
+        continue
+      fi
+
+      if (( loop % 5 == 0 )); then
+        api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null
+      fi
+      if (( loop % 20 == 0 )); then
+        api POST /api/agent/v1/metrics "$(metrics_payload)" >/dev/null
+      fi
+      if (( loop % 10 == 0 )); then
+        log "alive loop=${loop}"
       fi
       set -e
       sleep 0.5

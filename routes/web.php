@@ -40,6 +40,7 @@ Route::middleware(['auth', 'verified', 'organization'])->group(function () {
 
     Route::get('websites', [WebsiteController::class, 'index'])->name('websites.index');
     Route::get('websites/{website}', [WebsiteController::class, 'show'])->name('websites.show');
+    Route::get('websites/{website}/status', [WebsiteController::class, 'status'])->name('websites.status');
     Route::post('websites/{website}/start', [WebsiteController::class, 'start'])->name('websites.start');
     Route::post('websites/{website}/stop', [WebsiteController::class, 'stop'])->name('websites.stop');
     Route::post('websites/{website}/restart', [WebsiteController::class, 'restart'])->name('websites.restart');

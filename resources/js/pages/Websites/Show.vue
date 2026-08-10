@@ -44,13 +44,38 @@ defineOptions({
     },
 });
 
+const websiteStatus = ref(props.website.status);
+const latestJob = ref<LatestJob | null>(props.latest_job);
+const submitting = ref(false);
+
+watch(
+    () => props.website.status,
+    (value) => {
+        websiteStatus.value = value;
+    },
+);
+
+watch(
+    () => props.latest_job,
+    (value) => {
+        latestJob.value = value;
+    },
+    { deep: true },
+);
+
 const busy = computed(() => {
-    const status = props.latest_job?.status;
+    if (submitting.value) {
+        return true;
+    }
+    const status = latestJob.value?.status;
     return status === 'pending' || status === 'running';
 });
 
 const jobLabel = computed(() => {
-    const type = props.latest_job?.type ?? '';
+    if (submitting.value && !latestJob.value) {
+        return 'Applying changes…';
+    }
+    const type = latestJob.value?.type ?? '';
     return (
         {
             website_start: 'Starting website…',
@@ -74,30 +99,67 @@ function stopPolling() {
     pollStartedAt.value = null;
 }
 
+async function fetchStatus(): Promise<void> {
+    const response = await fetch(`/websites/${props.website.id}/status`, {
+        headers: {
+            Accept: 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+        },
+        credentials: 'same-origin',
+    });
+
+    if (!response.ok) {
+        return;
+    }
+
+    const data = (await response.json()) as {
+        website: { status: string };
+        latest_job: LatestJob | null;
+    };
+
+    const previous = latestJob.value;
+    websiteStatus.value = data.website.status;
+    latestJob.value = data.latest_job;
+
+    const job = data.latest_job;
+    if (job && (job.status === 'pending' || job.status === 'running')) {
+        return;
+    }
+
+    stopPolling();
+
+    const wasBusy =
+        previous &&
+        (previous.status === 'pending' || previous.status === 'running');
+
+    if (
+        wasBusy &&
+        job &&
+        (job.status === 'success' ||
+            job.status === 'failed' ||
+            job.status === 'expired')
+    ) {
+        notifyJobResult(job);
+    }
+}
+
 function startPolling() {
     if (pollTimer) {
         return;
     }
 
     pollStartedAt.value = Date.now();
+    void fetchStatus();
 
     pollTimer = setInterval(() => {
-        if (
-            pollStartedAt.value &&
-            Date.now() - pollStartedAt.value > 90_000
-        ) {
+        if (pollStartedAt.value && Date.now() - pollStartedAt.value > 90_000) {
             stopPolling();
             toast.error(
-                'Remote agent did not respond. Check syshealthd on that server.',
+                'Remote agent did not respond. On that server run: systemctl status syshealthd',
             );
             return;
         }
-
-        router.reload({
-            only: ['website', 'latest_job', 'server'],
-            preserveScroll: true,
-            preserveState: true,
-        });
+        void fetchStatus();
     }, 1000);
 }
 
@@ -127,27 +189,10 @@ function notifyJobResult(job: LatestJob) {
 }
 
 watch(
-    () => props.latest_job,
-    (job, previous) => {
+    latestJob,
+    (job) => {
         if (job && (job.status === 'pending' || job.status === 'running')) {
             startPolling();
-            return;
-        }
-
-        stopPolling();
-
-        const wasBusy =
-            previous &&
-            (previous.status === 'pending' || previous.status === 'running');
-
-        if (
-            wasBusy &&
-            job &&
-            (job.status === 'success' ||
-                job.status === 'failed' ||
-                job.status === 'expired')
-        ) {
-            notifyJobResult(job);
         }
     },
     { immediate: true, deep: true },
@@ -170,17 +215,16 @@ function confirmAction(action: string, path: string) {
         return;
     }
 
+    submitting.value = true;
+
     router.post(path, {}, {
         preserveScroll: true,
-        onSuccess: () => {
-            // Ensure polling starts immediately after an agent-backed action.
-            if (
-                props.latest_job &&
-                (props.latest_job.status === 'pending' ||
-                    props.latest_job.status === 'running')
-            ) {
-                startPolling();
-            }
+        onFinish: () => {
+            submitting.value = false;
+            startPolling();
+        },
+        onError: () => {
+            toast.error('Request failed');
         },
     });
 }
@@ -196,7 +240,7 @@ function confirmAction(action: string, path: string) {
                     <h1 class="text-2xl font-semibold">
                         {{ website.primary_domain }}
                     </h1>
-                    <StatusBadge :status="website.status" />
+                    <StatusBadge :status="websiteStatus" />
                 </div>
                 <p class="mt-1 text-sm text-muted-foreground">
                     on

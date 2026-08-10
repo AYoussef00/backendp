@@ -102,6 +102,39 @@ class WebsiteController extends Controller
         ]);
     }
 
+    public function status(Website $website): \Illuminate\Http\JsonResponse
+    {
+        $this->authorize('view', $website);
+
+        $website->loadMissing('server');
+        $website->refresh();
+
+        $latestJob = ServerJob::query()
+            ->where('website_id', $website->id)
+            ->latest('id')
+            ->first();
+
+        return response()->json([
+            'website' => [
+                'id' => $website->id,
+                'status' => $website->status->value,
+                'last_synced_at' => $website->last_synced_at?->toIso8601String(),
+            ],
+            'server' => [
+                'id' => $website->server_id,
+                'last_seen_at' => $website->server?->last_seen_at?->toIso8601String(),
+            ],
+            'latest_job' => $latestJob ? [
+                'uuid' => $latestJob->uuid,
+                'type' => $latestJob->type->value,
+                'status' => $latestJob->status->value,
+                'error_code' => $latestJob->error_code,
+                'error_message' => $latestJob->error_message,
+                'completed_at' => $latestJob->completed_at?->toIso8601String(),
+            ] : null,
+        ]);
+    }
+
     public function start(Request $request, Website $website): RedirectResponse
     {
         return $this->handleWebsiteAction($request, $website, 'start', AgentCommand::WebsiteStart, 'website.started', 'Website started');
@@ -169,32 +202,11 @@ class WebsiteController extends Controller
 
     private function shouldRunLocally(Website $website): bool
     {
+        // Only servers explicitly marked as local — never guess from filesystem paths
+        // (remote sites can share the same config basename and hang the panel request).
         $localIds = config('zyrox.local_server_ids', []);
-        if (is_array($localIds) && in_array((int) $website->server_id, $localIds, true)) {
-            return true;
-        }
 
-        // Only treat as local when THIS host actually has that site's config.
-        $path = (string) ($website->config_path ?: '');
-        if ($path !== '' && (is_file($path) || is_link($path))) {
-            return true;
-        }
-
-        $base = $path !== '' ? basename($path) : '';
-        if ($base !== '') {
-            foreach ([
-                '/etc/nginx/sites-enabled/'.$base,
-                '/etc/nginx/sites-available/'.$base,
-                '/etc/apache2/sites-enabled/'.$base,
-                '/etc/apache2/sites-available/'.$base,
-            ] as $candidate) {
-                if (is_file($candidate) || is_link($candidate)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
+        return is_array($localIds) && in_array((int) $website->server_id, $localIds, true);
     }
 
     private function runViaAgent(
@@ -244,34 +256,7 @@ class WebsiteController extends Controller
             request: $request,
         );
 
-        // Brief wait only — long blocking hits nginx 504 (proxy_read_timeout).
-        // If the agent is slow, the website page polls latest_job and toasts the result.
-        $deadline = now()->addSeconds(12);
-        do {
-            $job->refresh();
-            if (in_array($job->status, [
-                ServerJobStatus::Success,
-                ServerJobStatus::Failed,
-                ServerJobStatus::Expired,
-                ServerJobStatus::Cancelled,
-            ], true)) {
-                break;
-            }
-            usleep(200_000);
-        } while (now()->lt($deadline));
-
-        $job->refresh();
-        $website->refresh();
-
-        if ($job->status === ServerJobStatus::Success) {
-            return back()->with('success', $successMessage);
-        }
-
-        if ($job->status === ServerJobStatus::Failed) {
-            return back()->with('error', $job->error_message ?: 'Action failed on the remote server.');
-        }
-
-        // Still pending/running: no flash (avoids "queued" noise). UI keeps polling.
-        return back();
+        // Never block the HTTP request (nginx 504). The Show page polls /status.
+        return redirect()->route('websites.show', $website);
     }
 }
