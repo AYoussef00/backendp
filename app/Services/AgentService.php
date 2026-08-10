@@ -117,8 +117,9 @@ class AgentService
                 payload: ['hostname' => $server->hostname],
             );
 
-            $this->jobService->dispatch($server, AgentCommand::DiscoverServer, priority: 90);
-            $this->jobService->dispatch($server, AgentCommand::DiscoverWebsites, priority: 85);
+            // Keep discovery below interactive website actions (priority 100).
+            $this->jobService->dispatch($server, AgentCommand::DiscoverServer, priority: 40);
+            $this->jobService->dispatch($server, AgentCommand::DiscoverWebsites, priority: 40);
 
             return [
                 'server' => $server->fresh(),

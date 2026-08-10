@@ -191,6 +191,13 @@ class AgentController extends Controller
             ], 403);
         }
 
+        if ($job->status === ServerJobStatus::Cancelled) {
+            return response()->json([
+                'success' => false,
+                'error' => ['code' => 'JOB_CANCELLED', 'message' => 'Job was cancelled.'],
+            ], 409);
+        }
+
         if ($job->status === ServerJobStatus::Expired || $job->isExpired()) {
             $job->update(['status' => ServerJobStatus::Expired, 'completed_at' => now()]);
 
@@ -198,6 +205,16 @@ class AgentController extends Controller
                 'success' => false,
                 'error' => ['code' => 'JOB_EXPIRED', 'message' => 'Job expired.'],
             ], 410);
+        }
+
+        if (in_array($job->status, [ServerJobStatus::Success, ServerJobStatus::Failed], true)) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'job_uuid' => $job->uuid,
+                    'status' => $job->status->value,
+                ],
+            ]);
         }
 
         $data = $request->validate([

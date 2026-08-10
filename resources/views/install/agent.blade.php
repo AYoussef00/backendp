@@ -200,9 +200,10 @@ JSON
 }
 
 parse_job() {
-  printf '%s' "${1:-{}}" | python3 -c '
-import json, sys
-raw = sys.stdin.read().strip() or "{}"
+  # Pass JSON via env so heredoc stdin cannot swallow the payload.
+  JOB_JSON="${1:-{}}" python3 - <<'PY' 2>/dev/null || true
+import json, os
+raw = os.environ.get("JOB_JSON") or "{}"
 try:
     data = json.loads(raw)
 except Exception:
@@ -218,8 +219,8 @@ if not job:
 else:
     print(job.get("id") or "")
     print(job.get("type") or "")
-    print(json.dumps(job.get("payload") or {}))
-'
+    print(json.dumps(job.get("payload") or {}, separators=(",", ":")))
+PY
 }
 
 json_err() {
@@ -417,15 +418,19 @@ case "${cmd}" in
             result_json='{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback does not support this command yet"}}'
             ;;
         esac
-        api POST "/api/agent/v1/jobs/${job_id}/result" "${result_json}" >/dev/null
+        if api POST "/api/agent/v1/jobs/${job_id}/result" "${result_json}" >/dev/null; then
+          log "result posted id=${job_id} type=${job_type}"
+        else
+          log "result post failed id=${job_id} type=${job_type}"
+        fi
         case "${job_type}" in
           website_*)
-            api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null
+            ( api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || true ) &
             ;;
         esac
       fi
       set -e
-      sleep 1
+      sleep 0.5
     done
     ;;
   *)

@@ -60,7 +60,8 @@ class AppServiceProvider extends ServiceProvider
         RateLimiter::for('agent', function (Request $request) {
             $key = $request->header('X-Agent-Id') ?: $request->ip();
 
-            return Limit::perMinute(120)->by((string) $key);
+            // Bash agents poll ~1 req/s plus heartbeats/metrics.
+            return Limit::perMinute(600)->by((string) $key);
         });
     }
 }

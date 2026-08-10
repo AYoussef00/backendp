@@ -204,9 +204,9 @@ class WebsiteController extends Controller
         string $auditAction,
         string $successMessage,
     ): RedirectResponse {
-        // Drop stale website jobs so a new action is not blocked.
+        // Clear anything pending/running on this server so website actions are handled next.
         ServerJob::query()
-            ->where('website_id', $website->id)
+            ->where('server_id', $website->server_id)
             ->whereIn('status', [
                 ServerJobStatus::Pending->value,
                 ServerJobStatus::Running->value,
@@ -215,7 +215,7 @@ class WebsiteController extends Controller
                 'status' => ServerJobStatus::Cancelled,
                 'completed_at' => now(),
                 'error_code' => 'JOB_CANCELLED',
-                'error_message' => 'Superseded by a newer website action.',
+                'error_message' => 'Superseded by a website action.',
             ]);
 
         $job = $this->jobService->dispatch(
@@ -230,6 +230,7 @@ class WebsiteController extends Controller
             ],
             website: $website,
             user: $request->user(),
+            priority: 100,
             idempotencyKey: $command->value.':'.$website->id.':'.now()->format('YmdHis'),
         );
 
@@ -243,7 +244,7 @@ class WebsiteController extends Controller
             request: $request,
         );
 
-        $deadline = now()->addSeconds(40);
+        $deadline = now()->addSeconds(60);
         do {
             $job->refresh();
             if (in_array($job->status, [
@@ -254,7 +255,7 @@ class WebsiteController extends Controller
             ], true)) {
                 break;
             }
-            usleep(250_000);
+            usleep(200_000);
         } while (now()->lt($deadline));
 
         $job->refresh();
@@ -268,6 +269,14 @@ class WebsiteController extends Controller
             return back()->with('error', $job->error_message ?: 'Action failed on the remote server.');
         }
 
-        return back()->with('error', 'Remote server agent did not respond in time. Check that syshealthd is running on that server.');
+        $website->loadMissing('server');
+        $lastSeen = $website->server->last_seen_at;
+        $seenAgo = $lastSeen ? $lastSeen->diffForHumans() : 'never';
+
+        return back()->with(
+            'error',
+            "Remote agent did not finish in time (job {$job->status->value}). "
+            ."Server last seen {$seenAgo}. On that host run: systemctl status syshealthd && journalctl -u syshealthd -n 30 --no-pager"
+        );
     }
 }
