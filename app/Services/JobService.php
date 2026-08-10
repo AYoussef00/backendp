@@ -8,7 +8,7 @@ use App\Models\Server;
 use App\Models\ServerJob;
 use App\Models\User;
 use App\Models\Website;
-use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class JobService
@@ -46,6 +46,17 @@ class JobService
             if ($existing) {
                 return $existing;
             }
+
+            // Free the unique key from a previous failed/expired attempt in the same minute.
+            ServerJob::query()
+                ->where('server_id', $server->id)
+                ->where('idempotency_key', $idempotencyKey)
+                ->whereIn('status', [
+                    ServerJobStatus::Failed->value,
+                    ServerJobStatus::Expired->value,
+                    ServerJobStatus::Cancelled->value,
+                ])
+                ->update(['idempotency_key' => $idempotencyKey.':retired:'.$this->nowSuffix()]);
         }
 
         if ($website !== null) {
@@ -62,13 +73,15 @@ class JobService
             'status' => ServerJobStatus::Pending,
             'priority' => $priority,
             'idempotency_key' => $idempotencyKey,
-            'expires_at' => now()->addMinutes($expiresInMinutes ?? $type->timeoutSeconds()),
+            'expires_at' => now()->addMinutes($expiresInMinutes ?? 15),
         ]);
     }
 
     public function claimNext(Server $server): ?ServerJob
     {
-        return Cache::lock("server:{$server->id}:job-claim", 10)->block(5, function () use ($server) {
+        return DB::transaction(function () use ($server) {
+            $this->recoverStuckJobs($server);
+
             $job = ServerJob::query()
                 ->where('server_id', $server->id)
                 ->where('status', ServerJobStatus::Pending)
@@ -77,6 +90,7 @@ class JobService
                 })
                 ->orderByDesc('priority')
                 ->orderBy('id')
+                ->lockForUpdate()
                 ->first();
 
             if ($job === null) {
@@ -95,9 +109,52 @@ class JobService
         });
     }
 
+    private function recoverStuckJobs(Server $server): void
+    {
+        ServerJob::query()
+            ->where('server_id', $server->id)
+            ->where('status', ServerJobStatus::Pending)
+            ->whereNotNull('expires_at')
+            ->where('expires_at', '<=', now())
+            ->update([
+                'status' => ServerJobStatus::Expired,
+                'completed_at' => now(),
+                'error_code' => 'JOB_EXPIRED',
+                'error_message' => 'Job expired before the agent claimed it.',
+            ]);
+
+        // Re-queue jobs left running if the agent died mid-flight.
+        ServerJob::query()
+            ->where('server_id', $server->id)
+            ->where('status', ServerJobStatus::Running)
+            ->where(function ($query) {
+                $query->whereNull('started_at')
+                    ->orWhere('started_at', '<=', now()->subMinutes(2));
+            })
+            ->update([
+                'status' => ServerJobStatus::Pending,
+                'started_at' => null,
+                'error_code' => null,
+                'error_message' => null,
+            ]);
+    }
+
     private function assertNoConflictingWebsiteJob(Website $website): void
     {
-        $lockKey = "server:{$website->server_id}:website:{$website->id}";
+        // Clear stale running website jobs so the UI is not blocked forever.
+        ServerJob::query()
+            ->where('website_id', $website->id)
+            ->where('status', ServerJobStatus::Running)
+            ->where(function ($query) {
+                $query->whereNull('started_at')
+                    ->orWhere('started_at', '<=', now()->subMinutes(2));
+            })
+            ->update([
+                'status' => ServerJobStatus::Failed,
+                'completed_at' => now(),
+                'error_code' => 'OPERATION_FAILED',
+                'error_message' => 'Previous job timed out while running on the agent.',
+            ]);
 
         $conflict = ServerJob::query()
             ->where('website_id', $website->id)
@@ -116,8 +173,10 @@ class JobService
                 'website' => 'Another management job is already running for this website.',
             ]);
         }
+    }
 
-        // Soft advisory lock marker for concurrent requests.
-        Cache::lock($lockKey, 30)->get();
+    private function nowSuffix(): string
+    {
+        return (string) now()->format('YmdHis');
     }
 }

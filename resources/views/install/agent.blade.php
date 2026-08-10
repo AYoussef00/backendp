@@ -86,25 +86,43 @@ PANEL_URL="${SHD_URL:-${ZYROX_PANEL_URL:-}}"
 AGENT_ID="${SHD_ID:-${ZYROX_AGENT_ID:-}}"
 AGENT_SECRET="${SHD_SECRET:-${ZYROX_AGENT_SECRET:-}}"
 AGENT_VERSION="${SHD_VERSION:-${ZYROX_AGENT_VERSION:-1.0.0-bash}}"
+LOG_FILE="${SHD_LOG_FILE:-/var/log/syshealth/daemon.log}"
+
+mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
+
+log() {
+  printf '%s %s\n' "$(date -Is 2>/dev/null || date)" "$*" | tee -a "${LOG_FILE}" >/dev/null
+  printf '%s %s\n' "$(date -Is 2>/dev/null || date)" "$*" >&2
+}
 
 api() {
   local method="$1"
   local path="$2"
   local data="${3:-}"
+  local tmp response code
+  tmp="$(mktemp)"
   if [[ -n "${data}" ]]; then
-    curl -fsS -X "${method}" "${PANEL_URL}${path}" \
+    code="$(curl -sS -o "${tmp}" -w '%{http_code}' -X "${method}" "${PANEL_URL}${path}" \
       -H "Content-Type: application/json" \
       -H "Accept: application/json" \
       -H "X-Agent-Id: ${AGENT_ID}" \
       -H "X-Agent-Secret: ${AGENT_SECRET}" \
-      -d "${data}"
+      -d "${data}" 2>/dev/null || echo 000)"
   else
-    curl -fsS -X "${method}" "${PANEL_URL}${path}" \
+    code="$(curl -sS -o "${tmp}" -w '%{http_code}' -X "${method}" "${PANEL_URL}${path}" \
       -H "Accept: application/json" \
       -H "X-Agent-Id: ${AGENT_ID}" \
-      -H "X-Agent-Secret: ${AGENT_SECRET}"
+      -H "X-Agent-Secret: ${AGENT_SECRET}" 2>/dev/null || echo 000)"
   fi
+  response="$(cat "${tmp}" 2>/dev/null || true)"
+  rm -f "${tmp}"
+  if [[ "${code}" != 2* ]]; then
+    log "api ${method} ${path} failed http=${code} body=${response:0:300}"
+    return 1
+  fi
+  printf '%s' "${response}"
 }
+
 
 hostname_val() { hostname -f 2>/dev/null || hostname; }
 
@@ -307,47 +325,57 @@ case "${cmd}" in
     echo ok
     ;;
   run)
+    log "syshealthd starting panel=${PANEL_URL} agent_id=${AGENT_ID}"
     api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null || true
     api POST /api/agent/v1/discovery "$(discover_payload)" >/dev/null || true
     api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || true
     loop=0
     while true; do
+      set +e
       loop=$((loop + 1))
       if (( loop % 2 == 1 )); then
-        api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null || true
+        api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null
       fi
       if (( loop % 6 == 0 )); then
-        api POST /api/agent/v1/metrics "$(metrics_payload)" >/dev/null || true
+        api POST /api/agent/v1/metrics "$(metrics_payload)" >/dev/null
       fi
-      job_json="$(api GET /api/agent/v1/jobs || echo '{}')"
+      job_json="$(api GET /api/agent/v1/jobs)"
+      api_rc=$?
+      if [[ ${api_rc} -ne 0 || -z "${job_json}" ]]; then
+        job_json='{}'
+      fi
       job_meta="$(parse_job "${job_json}")"
       job_id="$(printf '%s' "${job_meta}" | sed -n '1p')"
       job_type="$(printf '%s' "${job_meta}" | sed -n '2p')"
       job_payload="$(printf '%s' "${job_meta}" | sed -n '3p')"
       if [[ -n "${job_id}" ]]; then
+        log "claimed job id=${job_id} type=${job_type}"
         case "${job_type}" in
           discover_server)
-            api POST /api/agent/v1/discovery "$(discover_payload)" >/dev/null || true
-            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":true,"result":{"ok":true}}' >/dev/null || true
+            api POST /api/agent/v1/discovery "$(discover_payload)" >/dev/null
+            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":true,"result":{"ok":true}}' >/dev/null
             ;;
           discover_websites)
-            api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || true
-            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":true,"result":{"ok":true}}' >/dev/null || true
+            api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null
+            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":true,"result":{"ok":true}}' >/dev/null
             ;;
           get_metrics)
-            api POST "/api/agent/v1/jobs/${job_id}/result" "{\"success\":true,\"result\":$(metrics_payload)}" >/dev/null || true
+            api POST "/api/agent/v1/jobs/${job_id}/result" "{\"success\":true,\"result\":$(metrics_payload)}" >/dev/null
             ;;
           website_start|website_stop|website_restart|website_enable|website_disable)
             result_json="$(handle_website_job "${job_type}" "${job_payload:-{}}")"
-            api POST "/api/agent/v1/jobs/${job_id}/result" "${result_json}" >/dev/null || true
-            api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || true
+            log "website job result=${result_json}"
+            api POST "/api/agent/v1/jobs/${job_id}/result" "${result_json}" >/dev/null
+            api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null
             ;;
           *)
-            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback does not support this command yet"}}' >/dev/null || true
+            log "unsupported job type=${job_type}"
+            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback does not support this command yet"}}' >/dev/null
             ;;
         esac
       fi
-      sleep 5
+      set -e
+      sleep 3
     done
     ;;
   *)
