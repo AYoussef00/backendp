@@ -126,14 +126,26 @@ func (r *Runner) execute(jobType string, payload map[string]any) (map[string]any
 	case "get_logs":
 		return readLogs(payload)
 	case "website_enable", "website_start":
-		return websiteToggle(payload, true)
+		result, code, msg, ok := websiteToggle(payload, true)
+		if ok {
+			_ = r.client.Websites(append(nginx.DiscoverSites(), apache.DiscoverSites()...))
+		}
+		return result, code, msg, ok
 	case "website_disable", "website_stop":
-		return websiteToggle(payload, false)
+		result, code, msg, ok := websiteToggle(payload, false)
+		if ok {
+			_ = r.client.Websites(append(nginx.DiscoverSites(), apache.DiscoverSites()...))
+		}
+		return result, code, msg, ok
 	case "website_restart":
 		if _, code, msg, ok := websiteToggle(payload, false); !ok {
 			return nil, code, msg, false
 		}
-		return websiteToggle(payload, true)
+		result, code, msg, ok := websiteToggle(payload, true)
+		if ok {
+			_ = r.client.Websites(append(nginx.DiscoverSites(), apache.DiscoverSites()...))
+		}
+		return result, code, msg, ok
 	case "service_start", "service_stop", "service_restart", "service_reload", "service_status":
 		return serviceAction(jobType, payload)
 	case "nginx_test":

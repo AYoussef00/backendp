@@ -1,7 +1,18 @@
 <script setup lang="ts">
-import { Form, Head, Link, router } from '@inertiajs/vue3';
+import { Head, Link, router } from '@inertiajs/vue3';
+import { computed, onUnmounted, ref, watch } from 'vue';
+import { toast } from 'vue-sonner';
 import StatusBadge from '@/components/status/StatusBadge.vue';
 import { Button } from '@/components/ui/button';
+
+type LatestJob = {
+    uuid: string;
+    type: string;
+    status: string;
+    error_code: string | null;
+    error_message: string | null;
+    completed_at: string | null;
+};
 
 const props = defineProps<{
     website: {
@@ -20,6 +31,7 @@ const props = defineProps<{
         last_synced_at: string | null;
     };
     server: { id: number; name: string; status: string };
+    latest_job: LatestJob | null;
 }>();
 
 defineOptions({
@@ -31,7 +43,109 @@ defineOptions({
     },
 });
 
+const busy = computed(() => {
+    const status = props.latest_job?.status;
+    return status === 'pending' || status === 'running';
+});
+
+const jobLabel = computed(() => {
+    const type = props.latest_job?.type ?? '';
+    return (
+        {
+            website_start: 'Starting website…',
+            website_stop: 'Stopping website…',
+            website_restart: 'Restarting website…',
+            website_enable: 'Enabling website…',
+            website_disable: 'Disabling website…',
+        }[type] ?? 'Applying changes…'
+    );
+});
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+const lastNotifiedUuid = ref<string | null>(null);
+
+function stopPolling() {
+    if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+}
+
+function startPolling() {
+    if (pollTimer) {
+        return;
+    }
+
+    pollTimer = setInterval(() => {
+        router.reload({
+            only: ['website', 'latest_job', 'server'],
+            preserveScroll: true,
+            preserveState: true,
+        });
+    }, 2000);
+}
+
+function notifyJobResult(job: LatestJob) {
+    if (lastNotifiedUuid.value === `${job.uuid}:${job.status}`) {
+        return;
+    }
+
+    lastNotifiedUuid.value = `${job.uuid}:${job.status}`;
+
+    if (job.status === 'success') {
+        const message =
+            {
+                website_start: 'Website started',
+                website_stop: 'Website stopped',
+                website_restart: 'Website restarted',
+                website_enable: 'Website enabled',
+                website_disable: 'Website disabled',
+            }[job.type] ?? 'Action completed';
+        toast.success(message);
+        return;
+    }
+
+    if (job.status === 'failed' || job.status === 'expired') {
+        toast.error(job.error_message || 'Action failed on the server');
+    }
+}
+
+watch(
+    () => props.latest_job,
+    (job, previous) => {
+        if (job && (job.status === 'pending' || job.status === 'running')) {
+            startPolling();
+            return;
+        }
+
+        stopPolling();
+
+        const wasBusy =
+            previous &&
+            (previous.status === 'pending' || previous.status === 'running');
+
+        if (
+            wasBusy &&
+            job &&
+            (job.status === 'success' ||
+                job.status === 'failed' ||
+                job.status === 'expired')
+        ) {
+            notifyJobResult(job);
+        }
+    },
+    { immediate: true, deep: true },
+);
+
+onUnmounted(() => {
+    stopPolling();
+});
+
 function confirmAction(action: string, path: string) {
+    if (busy.value) {
+        return;
+    }
+
     if (
         !confirm(
             `Are you sure you want to ${action} ${props.website.primary_domain}?`,
@@ -40,7 +154,12 @@ function confirmAction(action: string, path: string) {
         return;
     }
 
-    router.post(path);
+    router.post(path, {}, {
+        preserveScroll: true,
+        onSuccess: () => {
+            startPolling();
+        },
+    });
 }
 </script>
 
@@ -64,10 +183,17 @@ function confirmAction(action: string, path: string) {
                         >{{ server.name }}</Link
                     >
                 </p>
+                <p
+                    v-if="busy"
+                    class="mt-2 text-sm text-amber-600 dark:text-amber-400"
+                >
+                    {{ jobLabel }}
+                </p>
             </div>
             <div class="flex flex-wrap gap-2">
                 <Button
                     variant="outline"
+                    :disabled="busy"
                     @click="
                         confirmAction(
                             'restart',
@@ -78,6 +204,7 @@ function confirmAction(action: string, path: string) {
                 >
                 <Button
                     variant="outline"
+                    :disabled="busy"
                     @click="
                         confirmAction('stop', `/websites/${website.id}/stop`)
                     "
@@ -85,6 +212,7 @@ function confirmAction(action: string, path: string) {
                 >
                 <Button
                     variant="outline"
+                    :disabled="busy"
                     @click="
                         confirmAction('start', `/websites/${website.id}/start`)
                     "

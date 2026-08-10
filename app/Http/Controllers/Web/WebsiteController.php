@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Web;
 
 use App\Enums\AgentCommand;
 use App\Http\Controllers\Controller;
+use App\Models\ServerJob;
 use App\Models\Website;
 use App\Services\AuditLogger;
 use App\Services\JobService;
@@ -56,6 +57,11 @@ class WebsiteController extends Controller
 
         $website->load('server');
 
+        $latestJob = ServerJob::query()
+            ->where('website_id', $website->id)
+            ->latest('id')
+            ->first();
+
         return Inertia::render('Websites/Show', [
             'website' => [
                 'id' => $website->id,
@@ -79,6 +85,14 @@ class WebsiteController extends Controller
                 'name' => $website->server->name,
                 'status' => $website->server->status->value,
             ],
+            'latest_job' => $latestJob ? [
+                'uuid' => $latestJob->uuid,
+                'type' => $latestJob->type->value,
+                'status' => $latestJob->status->value,
+                'error_code' => $latestJob->error_code,
+                'error_message' => $latestJob->error_message,
+                'completed_at' => $latestJob->completed_at?->toIso8601String(),
+            ] : null,
         ]);
     }
 
@@ -136,6 +150,6 @@ class WebsiteController extends Controller
             request: $request,
         );
 
-        return back()->with('success', 'Job queued: '.$command->value);
+        return back()->with('success', 'Action queued — waiting for the server…');
     }
 }

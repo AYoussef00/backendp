@@ -177,6 +177,123 @@ metrics_payload() {
 JSON
 }
 
+parse_job() {
+  JOB_JSON="${1:-{}}" python3 - <<'PY' 2>/dev/null || true
+import json, os
+raw = os.environ.get("JOB_JSON") or "{}"
+try:
+    data = json.loads(raw)
+except Exception:
+    print("")
+    print("")
+    print("{}")
+    raise SystemExit
+job = (data.get("data") or {}).get("job") or {}
+if not job:
+    print("")
+    print("")
+    print("{}")
+else:
+    print(job.get("id") or "")
+    print(job.get("type") or "")
+    print(json.dumps(job.get("payload") or {}))
+PY
+}
+
+website_toggle() {
+  local enable="$1"
+  local webserver="${2:-nginx}"
+  local config_path="$3"
+  local base enabled available src out
+
+  if [[ -z "${config_path}" ]]; then
+    echo '{"success":false,"error":{"code":"FILE_NOT_FOUND","message":"missing config_path"}}'
+    return
+  fi
+
+  base="$(basename "${config_path}")"
+
+  case "${webserver}" in
+    nginx|"")
+      enabled="/etc/nginx/sites-enabled/${base}"
+      available="/etc/nginx/sites-available/${base}"
+      if [[ "${enable}" == "1" ]]; then
+        if [[ ! -e "${enabled}" ]]; then
+          src="${available}"
+          [[ -e "${config_path}" ]] && src="${config_path}"
+          ln -sfn "${src}" "${enabled}" || {
+            echo '{"success":false,"error":{"code":"PERMISSION_DENIED","message":"failed to enable site"}}'
+            return
+          }
+        fi
+      else
+        rm -f "${enabled}"
+      fi
+      if ! out="$(nginx -t 2>&1)"; then
+        printf '{"success":false,"error":{"code":"NGINX_CONFIG_INVALID","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
+        return
+      fi
+      if ! out="$(systemctl reload nginx 2>&1)"; then
+        printf '{"success":false,"error":{"code":"OPERATION_FAILED","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
+        return
+      fi
+      ;;
+    apache)
+      if [[ "${enable}" == "1" ]]; then
+        if ! out="$(a2ensite "${base}" 2>&1)"; then
+          printf '{"success":false,"error":{"code":"OPERATION_FAILED","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
+          return
+        fi
+      else
+        if ! out="$(a2dissite "${base}" 2>&1)"; then
+          printf '{"success":false,"error":{"code":"OPERATION_FAILED","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
+          return
+        fi
+      fi
+      if ! out="$(systemctl reload apache2 2>&1)"; then
+        printf '{"success":false,"error":{"code":"OPERATION_FAILED","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
+        return
+      fi
+      ;;
+    *)
+      echo '{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"unsupported webserver"}}'
+      return
+      ;;
+  esac
+
+  if [[ "${enable}" == "1" ]]; then
+    echo '{"success":true,"result":{"enabled":true,"status":"active"}}'
+  else
+    echo '{"success":true,"result":{"enabled":false,"status":"disabled"}}'
+  fi
+}
+
+handle_website_job() {
+  local job_type="$1"
+  local payload_json="$2"
+  local webserver config_path result
+
+  webserver="$(printf '%s' "${payload_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("webserver") or "nginx")' 2>/dev/null || echo nginx)"
+  config_path="$(printf '%s' "${payload_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("config_path") or "")' 2>/dev/null || true)"
+
+  case "${job_type}" in
+    website_start|website_enable)
+      website_toggle 1 "${webserver}" "${config_path}"
+      ;;
+    website_stop|website_disable)
+      website_toggle 0 "${webserver}" "${config_path}"
+      ;;
+    website_restart)
+      result="$(website_toggle 0 "${webserver}" "${config_path}")"
+      if printf '%s' "${result}" | grep -q '"success":false'; then
+        printf '%s\n' "${result}"
+        return
+      fi
+      website_toggle 1 "${webserver}" "${config_path}"
+      ;;
+  esac
+}
+
 case "${cmd}" in
   version) echo "${AGENT_VERSION}" ;;
   status) echo "endpoint=${PANEL_URL} id=${AGENT_ID} version=${AGENT_VERSION}" ;;
@@ -193,12 +310,20 @@ case "${cmd}" in
     api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null || true
     api POST /api/agent/v1/discovery "$(discover_payload)" >/dev/null || true
     api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || true
+    loop=0
     while true; do
-      api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null || true
-      api POST /api/agent/v1/metrics "$(metrics_payload)" >/dev/null || true
+      loop=$((loop + 1))
+      if (( loop % 2 == 1 )); then
+        api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null || true
+      fi
+      if (( loop % 6 == 0 )); then
+        api POST /api/agent/v1/metrics "$(metrics_payload)" >/dev/null || true
+      fi
       job_json="$(api GET /api/agent/v1/jobs || echo '{}')"
-      job_id="$(printf '%s' "${job_json}" | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)"
-      job_type="$(printf '%s' "${job_json}" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p' | head -1)"
+      job_meta="$(parse_job "${job_json}")"
+      job_id="$(printf '%s' "${job_meta}" | sed -n '1p')"
+      job_type="$(printf '%s' "${job_meta}" | sed -n '2p')"
+      job_payload="$(printf '%s' "${job_meta}" | sed -n '3p')"
       if [[ -n "${job_id}" ]]; then
         case "${job_type}" in
           discover_server)
@@ -212,12 +337,17 @@ case "${cmd}" in
           get_metrics)
             api POST "/api/agent/v1/jobs/${job_id}/result" "{\"success\":true,\"result\":$(metrics_payload)}" >/dev/null || true
             ;;
+          website_start|website_stop|website_restart|website_enable|website_disable)
+            result_json="$(handle_website_job "${job_type}" "${job_payload:-{}}")"
+            api POST "/api/agent/v1/jobs/${job_id}/result" "${result_json}" >/dev/null || true
+            api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || true
+            ;;
           *)
             api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback does not support this command yet"}}' >/dev/null || true
             ;;
         esac
       fi
-      sleep 15
+      sleep 5
     done
     ;;
   *)

@@ -227,6 +227,8 @@ class AgentController extends Controller
             );
         }
 
+        $this->agentService->applyWebsiteJobResult($job->fresh(['website']), (bool) $data['success']);
+
         return response()->json([
             'success' => true,
             'data' => [

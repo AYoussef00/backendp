@@ -7,6 +7,7 @@ use App\Enums\ServerStatus;
 use App\Enums\WebsiteStatus;
 use App\Models\AgentInstallation;
 use App\Models\Server;
+use App\Models\ServerJob;
 use App\Models\ServerMetric;
 use App\Models\ServiceSnapshot;
 use App\Models\User;
@@ -235,10 +236,12 @@ class AgentService
         }
 
         if ($seen !== []) {
+            // Sites missing from sites-enabled discovery are treated as disabled, not unknown.
             Website::query()
                 ->where('server_id', $server->id)
                 ->whereNotIn('id', $seen)
-                ->update(['status' => WebsiteStatus::Unknown, 'last_synced_at' => now()]);
+                ->where('status', '!=', WebsiteStatus::Disabled)
+                ->update(['status' => WebsiteStatus::Disabled, 'last_synced_at' => now()]);
         }
 
         $this->auditLogger->log(
@@ -247,6 +250,45 @@ class AgentService
             server: $server,
             payload: ['count' => count($seen)],
         );
+    }
+
+    public function applyWebsiteJobResult(ServerJob $job, bool $success): void
+    {
+        $website = $job->website;
+        if ($website === null) {
+            $websiteId = data_get($job->payload, 'website_id');
+            if ($websiteId) {
+                $website = Website::query()->find($websiteId);
+            }
+        }
+
+        if ($website === null) {
+            return;
+        }
+
+        if (! $success) {
+            $website->forceFill([
+                'status' => WebsiteStatus::Error,
+                'last_synced_at' => now(),
+            ])->save();
+
+            return;
+        }
+
+        $status = match ($job->type) {
+            AgentCommand::WebsiteStop, AgentCommand::WebsiteDisable => WebsiteStatus::Disabled,
+            AgentCommand::WebsiteStart, AgentCommand::WebsiteEnable, AgentCommand::WebsiteRestart => WebsiteStatus::Active,
+            default => null,
+        };
+
+        if ($status === null) {
+            return;
+        }
+
+        $website->forceFill([
+            'status' => $status,
+            'last_synced_at' => now(),
+        ])->save();
     }
 
     public function storeMetrics(Server $server, array $payload): ServerMetric
