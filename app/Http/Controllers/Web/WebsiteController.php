@@ -136,9 +136,9 @@ class WebsiteController extends Controller
     ): RedirectResponse {
         $this->authorize('manage', $website);
 
-        $mode = config('zyrox.website_actions', 'local');
+        $mode = (string) config('zyrox.website_actions', 'auto');
 
-        if ($mode === 'local' || ($mode === 'auto' && $this->looksLocal($website))) {
+        if ($mode === 'local' || ($mode === 'auto' && $this->shouldRunLocally($website))) {
             try {
                 match ($action) {
                     'start', 'enable' => $this->websiteControl->start($website),
@@ -166,14 +166,34 @@ class WebsiteController extends Controller
         return $this->queueWebsiteAction($request, $website, $command, $auditAction);
     }
 
-    private function looksLocal(Website $website): bool
+    private function shouldRunLocally(Website $website): bool
     {
+        $localIds = config('zyrox.local_server_ids', []);
+        if (is_array($localIds) && in_array((int) $website->server_id, $localIds, true)) {
+            return true;
+        }
+
+        // Only treat as local when THIS host actually has that site's config.
         $path = (string) ($website->config_path ?: '');
         if ($path !== '' && (is_file($path) || is_link($path))) {
             return true;
         }
 
-        return is_dir('/etc/nginx/sites-enabled') || is_dir('/etc/apache2/sites-enabled');
+        $base = $path !== '' ? basename($path) : '';
+        if ($base !== '') {
+            foreach ([
+                '/etc/nginx/sites-enabled/'.$base,
+                '/etc/nginx/sites-available/'.$base,
+                '/etc/apache2/sites-enabled/'.$base,
+                '/etc/apache2/sites-available/'.$base,
+            ] as $candidate) {
+                if (is_file($candidate) || is_link($candidate)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private function queueWebsiteAction(Request $request, Website $website, AgentCommand $command, string $auditAction): RedirectResponse

@@ -5,10 +5,15 @@ return [
     'heartbeat_grace_seconds' => (int) env('ZYROX_HEARTBEAT_GRACE', 120),
     'metrics_retention_days' => (int) env('ZYROX_METRICS_RETENTION_DAYS', 7),
     'jobs_retention_days' => (int) env('ZYROX_JOBS_RETENTION_DAYS', 30),
-    // local = stop/start immediately on this machine (no agent queue)
-    // agent = queue job for remote agent
-    // auto  = local when nginx/apache configs exist on this host
-    'website_actions' => env('ZYROX_WEBSITE_ACTIONS', 'local'),
+    // local = always execute on the panel host
+    // agent = always queue for remote agent
+    // auto  = local for configured local server IDs / sites whose config exists here, else agent
+    'website_actions' => env('ZYROX_WEBSITE_ACTIONS', 'auto'),
+    // Comma-separated server IDs that live on the same machine as the panel
+    'local_server_ids' => array_values(array_filter(array_map(
+        static fn (string $id): int => (int) trim($id),
+        explode(',', (string) env('ZYROX_LOCAL_SERVER_IDS', '')),
+    ))),
     'allowed_file_roots' => [
         '/var/www',
         '/home',
