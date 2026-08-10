@@ -193,7 +193,7 @@ class ServerController extends Controller
 
         $issued = \App\Models\AgentInstallation::issue($server, $request->user());
         $baseUrl = rtrim((string) config('app.url'), '/');
-        $installCommand = sprintf('curl -fsSL %s/install/%s.sh | sudo bash', $baseUrl, $issued['plain_token']);
+        $installCommand = sprintf('curl -fsSL %s/install/%s | sudo bash', $baseUrl, $issued['plain_token']);
 
         $this->auditLogger->log(
             organization: $server->organization,

@@ -53,7 +53,7 @@ class AgentService
 
             $baseUrl = rtrim((string) config('app.url'), '/');
             $installCommand = sprintf(
-                'curl -fsSL %s/install/%s.sh | sudo bash',
+                'curl -fsSL %s/install/%s | sudo bash',
                 $baseUrl,
                 $issued['plain_token'],
             );

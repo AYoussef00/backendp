@@ -11,10 +11,16 @@ use Illuminate\Support\Facades\Route;
 
 Route::inertia('/', 'Welcome')->name('home');
 
-Route::get('/install/{token}.sh', InstallScriptController::class)
+Route::get('/install/{token}', InstallScriptController::class)
     ->where('token', '[A-Za-z0-9]+')
     ->middleware('throttle:30,1')
     ->name('install.script');
+
+// Legacy .sh URL (some hosts block *.sh static lookups with 404).
+Route::get('/install/{token}.sh', InstallScriptController::class)
+    ->where('token', '[A-Za-z0-9]+')
+    ->middleware('throttle:30,1')
+    ->name('install.script.legacy');
 
 Route::get('/agent/binaries/{binary}', AgentBinaryController::class)
     ->where('binary', 'zyrox-agent-[A-Za-z0-9.-]+')

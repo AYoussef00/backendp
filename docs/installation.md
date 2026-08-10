@@ -13,7 +13,7 @@
 2. Copy the install command:
 
 ```bash
-curl -fsSL https://panel.example.com/install/TOKEN.sh | sudo bash
+curl -fsSL https://panel.example.com/install/TOKEN | sudo bash
 ```
 
 3. The installer:
