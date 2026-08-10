@@ -91,9 +91,13 @@ LOG_FILE="${SHD_LOG_FILE:-/var/log/syshealth/daemon.log}"
 mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
 
 log() {
-  printf '%s %s\n' "$(date -Is 2>/dev/null || date)" "$*" | tee -a "${LOG_FILE}" >/dev/null
-  printf '%s %s\n' "$(date -Is 2>/dev/null || date)" "$*" >&2
+  # Always print to stderr first so journalctl shows activity.
+  printf '%s %s\n' "$(date -Is 2>/dev/null || date)" "$*" >&2 || true
+  printf '%s %s\n' "$(date -Is 2>/dev/null || date)" "$*" >> "${LOG_FILE}" 2>/dev/null || true
 }
+
+echo "$(date -Is 2>/dev/null || date) syshealthd boot cmd=${cmd:-} id=${AGENT_ID:-none}" >&2 || true
+
 
 api() {
   local method="$1"
@@ -474,10 +478,13 @@ Type=simple
 User=root
 Group=root
 EnvironmentFile=${CONFIG_DIR}/config.env
-ExecStart=${BINARY_PATH} run
+ExecStart=/bin/bash ${BINARY_PATH} run
 Restart=always
-RestartSec=5
+RestartSec=3
 PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=syshealthd
 
 [Install]
 WantedBy=multi-user.target
