@@ -157,11 +157,6 @@ function confirmAction(action: string, path: string) {
 
     router.post(path, {}, {
         preserveScroll: true,
-        onSuccess: () => {
-            if ((props.control_mode ?? 'local') !== 'local') {
-                startPolling();
-            }
-        },
     });
 }
 </script>

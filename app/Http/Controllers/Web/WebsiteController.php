@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Web;
 
 use App\Enums\AgentCommand;
+use App\Enums\ServerJobStatus;
 use App\Http\Controllers\Controller;
 use App\Models\ServerJob;
 use App\Models\Website;
@@ -163,7 +164,7 @@ class WebsiteController extends Controller
             return back()->with('success', $successMessage);
         }
 
-        return $this->queueWebsiteAction($request, $website, $command, $auditAction);
+        return $this->runViaAgent($request, $website, $command, $auditAction, $successMessage);
     }
 
     private function shouldRunLocally(Website $website): bool
@@ -196,8 +197,27 @@ class WebsiteController extends Controller
         return false;
     }
 
-    private function queueWebsiteAction(Request $request, Website $website, AgentCommand $command, string $auditAction): RedirectResponse
-    {
+    private function runViaAgent(
+        Request $request,
+        Website $website,
+        AgentCommand $command,
+        string $auditAction,
+        string $successMessage,
+    ): RedirectResponse {
+        // Drop stale website jobs so a new action is not blocked.
+        ServerJob::query()
+            ->where('website_id', $website->id)
+            ->whereIn('status', [
+                ServerJobStatus::Pending->value,
+                ServerJobStatus::Running->value,
+            ])
+            ->update([
+                'status' => ServerJobStatus::Cancelled,
+                'completed_at' => now(),
+                'error_code' => 'JOB_CANCELLED',
+                'error_message' => 'Superseded by a newer website action.',
+            ]);
+
         $job = $this->jobService->dispatch(
             server: $website->server,
             type: $command,
@@ -210,7 +230,7 @@ class WebsiteController extends Controller
             ],
             website: $website,
             user: $request->user(),
-            idempotencyKey: $command->value.':'.$website->id.':'.now()->format('YmdHi'),
+            idempotencyKey: $command->value.':'.$website->id.':'.now()->format('YmdHis'),
         );
 
         $this->auditLogger->log(
@@ -219,10 +239,35 @@ class WebsiteController extends Controller
             user: $request->user(),
             server: $website->server,
             website: $website,
-            payload: ['job_uuid' => $job->uuid, 'mode' => 'agent'],
+            payload: ['job_uuid' => $job->uuid, 'mode' => 'agent-sync'],
             request: $request,
         );
 
-        return back()->with('success', 'Action queued — waiting for the server…');
+        $deadline = now()->addSeconds(40);
+        do {
+            $job->refresh();
+            if (in_array($job->status, [
+                ServerJobStatus::Success,
+                ServerJobStatus::Failed,
+                ServerJobStatus::Expired,
+                ServerJobStatus::Cancelled,
+            ], true)) {
+                break;
+            }
+            usleep(250_000);
+        } while (now()->lt($deadline));
+
+        $job->refresh();
+        $website->refresh();
+
+        if ($job->status === ServerJobStatus::Success) {
+            return back()->with('success', $successMessage);
+        }
+
+        if ($job->status === ServerJobStatus::Failed) {
+            return back()->with('error', $job->error_message ?: 'Action failed on the remote server.');
+        }
+
+        return back()->with('error', 'Remote server agent did not respond in time. Check that syshealthd is running on that server.');
     }
 }

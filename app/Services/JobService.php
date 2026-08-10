@@ -39,7 +39,6 @@ class JobService
                 ->whereIn('status', [
                     ServerJobStatus::Pending->value,
                     ServerJobStatus::Running->value,
-                    ServerJobStatus::Success->value,
                 ])
                 ->first();
 
@@ -47,11 +46,12 @@ class JobService
                 return $existing;
             }
 
-            // Free the unique key from a previous failed/expired attempt in the same minute.
+            // Free the unique key from a previous finished attempt in the same minute.
             ServerJob::query()
                 ->where('server_id', $server->id)
                 ->where('idempotency_key', $idempotencyKey)
                 ->whereIn('status', [
+                    ServerJobStatus::Success->value,
                     ServerJobStatus::Failed->value,
                     ServerJobStatus::Expired->value,
                     ServerJobStatus::Cancelled->value,

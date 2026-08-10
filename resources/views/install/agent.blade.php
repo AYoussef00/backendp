@@ -200,9 +200,9 @@ JSON
 }
 
 parse_job() {
-  JOB_JSON="${1:-{}}" python3 - <<'PY' 2>/dev/null || true
-import json, os
-raw = os.environ.get("JOB_JSON") or "{}"
+  printf '%s' "${1:-{}}" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip() or "{}"
 try:
     data = json.loads(raw)
 except Exception:
@@ -210,7 +210,7 @@ except Exception:
     print("")
     print("{}")
     raise SystemExit
-job = (data.get("data") or {}).get("job") or {}
+job = (data.get("data") or {}).get("job")
 if not job:
     print("")
     print("")
@@ -219,7 +219,7 @@ else:
     print(job.get("id") or "")
     print(job.get("type") or "")
     print(json.dumps(job.get("payload") or {}))
-PY
+'
 }
 
 json_err() {
@@ -377,9 +377,6 @@ case "${cmd}" in
       if (( loop % 2 == 1 )); then
         api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null
       fi
-      if (( loop % 10 == 0 )); then
-        log "alive loop=${loop}"
-      fi
       if (( loop % 6 == 0 )); then
         api POST /api/agent/v1/metrics "$(metrics_payload)" >/dev/null
       fi
@@ -392,6 +389,9 @@ case "${cmd}" in
       job_id="$(printf '%s' "${job_meta}" | sed -n '1p')"
       job_type="$(printf '%s' "${job_meta}" | sed -n '2p')"
       job_payload="$(printf '%s' "${job_meta}" | sed -n '3p')"
+      if (( loop % 10 == 0 )); then
+        log "alive loop=${loop}"
+      fi
       if [[ -n "${job_id}" ]]; then
         log "claimed job id=${job_id} type=${job_type}"
         result_json='{"success":false,"error":{"code":"OPERATION_FAILED","message":"handler produced no result"}}'
@@ -412,10 +412,8 @@ case "${cmd}" in
             if [[ -z "${result_json}" ]]; then
               result_json='{"success":false,"error":{"code":"OPERATION_FAILED","message":"empty website handler result"}}'
             fi
-            log "website job result=${result_json}"
             ;;
           *)
-            log "unsupported job type=${job_type}"
             result_json='{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback does not support this command yet"}}'
             ;;
         esac
@@ -427,7 +425,7 @@ case "${cmd}" in
         esac
       fi
       set -e
-      sleep 3
+      sleep 1
     done
     ;;
   *)
