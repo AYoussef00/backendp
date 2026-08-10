@@ -12,6 +12,7 @@ class ZyroxCleanupCommand extends Command
 {
     protected $signature = 'zyrox:cleanup
                             {--jobs : Cleanup expired/old jobs}
+                            {--stuck : Cancel all pending/running jobs}
                             {--metrics : Cleanup old metrics}
                             {--tokens : Cleanup expired installation tokens}
                             {--all : Run all cleanup tasks}';
@@ -28,6 +29,22 @@ class ZyroxCleanupCommand extends Command
                 ->where('expires_at', '<', now())
                 ->delete();
             $this->info("Deleted {$tokens} expired installation tokens.");
+        }
+
+        if ($this->option('stuck')) {
+            $cancelled = ServerJob::query()
+                ->whereIn('status', [
+                    ServerJobStatus::Pending->value,
+                    ServerJobStatus::Running->value,
+                ])
+                ->update([
+                    'status' => ServerJobStatus::Cancelled,
+                    'completed_at' => now(),
+                    'error_code' => 'JOB_CANCELLED',
+                    'error_message' => 'Cancelled manually (stuck job cleanup).',
+                ]);
+
+            $this->info("Cancelled {$cancelled} stuck pending/running jobs.");
         }
 
         if ($all || $this->option('jobs')) {
