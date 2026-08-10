@@ -192,7 +192,7 @@ func websiteToggle(payload map[string]any, enable bool) (map[string]any, string,
 		if _, code, msg, ok := runAllowlisted("nginx", "-t"); !ok {
 			return nil, code, msg, false
 		}
-		return runAllowlisted("systemctl", "reload", "nginx")
+		return runAllowlisted("nginx", "-s", "reload")
 	case "apache":
 		if enable {
 			_, code, msg, ok := runAllowlisted("a2ensite", base)
@@ -205,7 +205,7 @@ func websiteToggle(payload map[string]any, enable bool) (map[string]any, string,
 				return nil, code, msg, false
 			}
 		}
-		return runAllowlisted("systemctl", "reload", "apache2")
+		return runAllowlisted("systemctl", "reload", "apache2", "--no-block")
 	default:
 		return nil, "JOB_NOT_ALLOWED", "unsupported webserver", false
 	}

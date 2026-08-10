@@ -218,64 +218,95 @@ else:
 PY
 }
 
+json_err() {
+  python3 -c 'import json,sys; print(json.dumps({"success":False,"error":{"code":sys.argv[1],"message":sys.argv[2]}}))' "$1" "$2"
+}
+
 website_toggle() {
   local enable="$1"
   local webserver="${2:-nginx}"
   local config_path="$3"
-  local base enabled available src out
+  local base enabled available src out rc
+  local nginx_bin="/usr/sbin/nginx"
+  local systemctl_bin="/bin/systemctl"
+
+  [[ -x "${nginx_bin}" ]] || nginx_bin="$(command -v nginx || true)"
+  [[ -x "${systemctl_bin}" ]] || systemctl_bin="$(command -v systemctl || true)"
 
   if [[ -z "${config_path}" ]]; then
-    echo '{"success":false,"error":{"code":"FILE_NOT_FOUND","message":"missing config_path"}}'
-    return
+    json_err "FILE_NOT_FOUND" "missing config_path"
+    return 0
   fi
 
   base="$(basename "${config_path}")"
 
   case "${webserver}" in
     nginx|"")
+      if [[ -z "${nginx_bin}" ]]; then
+        json_err "OPERATION_FAILED" "nginx binary not found"
+        return 0
+      fi
       enabled="/etc/nginx/sites-enabled/${base}"
       available="/etc/nginx/sites-available/${base}"
       if [[ "${enable}" == "1" ]]; then
         if [[ ! -e "${enabled}" ]]; then
           src="${available}"
-          [[ -e "${config_path}" ]] && src="${config_path}"
-          ln -sfn "${src}" "${enabled}" || {
-            echo '{"success":false,"error":{"code":"PERMISSION_DENIED","message":"failed to enable site"}}'
-            return
-          }
+          if [[ -e "${config_path}" && "${config_path}" != "${enabled}" ]]; then
+            src="${config_path}"
+          fi
+          if [[ ! -e "${src}" ]]; then
+            json_err "FILE_NOT_FOUND" "site config not found in sites-available"
+            return 0
+          fi
+          if ! ln -sfn "${src}" "${enabled}"; then
+            json_err "PERMISSION_DENIED" "failed to enable site"
+            return 0
+          fi
         fi
       else
-        rm -f "${enabled}"
+        if [[ -f "${enabled}" && ! -L "${enabled}" && ! -e "${available}" ]]; then
+          mkdir -p /etc/nginx/sites-available
+          mv -f "${enabled}" "${available}" || rm -f "${enabled}"
+        else
+          rm -f "${enabled}"
+        fi
       fi
-      if ! out="$(nginx -t 2>&1)"; then
-        printf '{"success":false,"error":{"code":"NGINX_CONFIG_INVALID","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
-        return
+      out="$(timeout 15 "${nginx_bin}" -t 2>&1)"
+      rc=$?
+      if [[ ${rc} -ne 0 ]]; then
+        json_err "NGINX_CONFIG_INVALID" "${out}"
+        return 0
       fi
-      if ! out="$(systemctl reload nginx 2>&1)"; then
-        printf '{"success":false,"error":{"code":"OPERATION_FAILED","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
-        return
+      # Avoid systemctl deadlock when called from inside another unit.
+      out="$(timeout 15 "${nginx_bin}" -s reload 2>&1)"
+      rc=$?
+      if [[ ${rc} -ne 0 ]]; then
+        json_err "OPERATION_FAILED" "${out}"
+        return 0
       fi
       ;;
     apache)
       if [[ "${enable}" == "1" ]]; then
-        if ! out="$(a2ensite "${base}" 2>&1)"; then
-          printf '{"success":false,"error":{"code":"OPERATION_FAILED","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
-          return
-        fi
+        out="$(timeout 15 a2ensite "${base}" 2>&1)"
+        rc=$?
       else
-        if ! out="$(a2dissite "${base}" 2>&1)"; then
-          printf '{"success":false,"error":{"code":"OPERATION_FAILED","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
-          return
-        fi
+        out="$(timeout 15 a2dissite "${base}" 2>&1)"
+        rc=$?
       fi
-      if ! out="$(systemctl reload apache2 2>&1)"; then
-        printf '{"success":false,"error":{"code":"OPERATION_FAILED","message":%s}}\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${out}")"
-        return
+      if [[ ${rc} -ne 0 ]]; then
+        json_err "OPERATION_FAILED" "${out}"
+        return 0
+      fi
+      out="$(timeout 15 "${systemctl_bin:-systemctl}" reload apache2 --no-block 2>&1)"
+      rc=$?
+      if [[ ${rc} -ne 0 ]]; then
+        json_err "OPERATION_FAILED" "${out}"
+        return 0
       fi
       ;;
     *)
-      echo '{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"unsupported webserver"}}'
-      return
+      json_err "JOB_NOT_ALLOWED" "unsupported webserver"
+      return 0
       ;;
   esac
 
@@ -284,6 +315,7 @@ website_toggle() {
   else
     echo '{"success":true,"result":{"enabled":false,"status":"disabled"}}'
   fi
+  return 0
 }
 
 handle_website_job() {
@@ -305,11 +337,15 @@ handle_website_job() {
       result="$(website_toggle 0 "${webserver}" "${config_path}")"
       if printf '%s' "${result}" | grep -q '"success":false'; then
         printf '%s\n' "${result}"
-        return
+        return 0
       fi
       website_toggle 1 "${webserver}" "${config_path}"
       ;;
+    *)
+      json_err "JOB_NOT_ALLOWED" "unknown website command"
+      ;;
   esac
+  return 0
 }
 
 case "${cmd}" in
@@ -350,27 +386,35 @@ case "${cmd}" in
       job_payload="$(printf '%s' "${job_meta}" | sed -n '3p')"
       if [[ -n "${job_id}" ]]; then
         log "claimed job id=${job_id} type=${job_type}"
+        result_json='{"success":false,"error":{"code":"OPERATION_FAILED","message":"handler produced no result"}}'
         case "${job_type}" in
           discover_server)
             api POST /api/agent/v1/discovery "$(discover_payload)" >/dev/null
-            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":true,"result":{"ok":true}}' >/dev/null
+            result_json='{"success":true,"result":{"ok":true}}'
             ;;
           discover_websites)
             api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null
-            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":true,"result":{"ok":true}}' >/dev/null
+            result_json='{"success":true,"result":{"ok":true}}'
             ;;
           get_metrics)
-            api POST "/api/agent/v1/jobs/${job_id}/result" "{\"success\":true,\"result\":$(metrics_payload)}" >/dev/null
+            result_json="{\"success\":true,\"result\":$(metrics_payload)}"
             ;;
           website_start|website_stop|website_restart|website_enable|website_disable)
             result_json="$(handle_website_job "${job_type}" "${job_payload:-{}}")"
+            if [[ -z "${result_json}" ]]; then
+              result_json='{"success":false,"error":{"code":"OPERATION_FAILED","message":"empty website handler result"}}'
+            fi
             log "website job result=${result_json}"
-            api POST "/api/agent/v1/jobs/${job_id}/result" "${result_json}" >/dev/null
-            api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null
             ;;
           *)
             log "unsupported job type=${job_type}"
-            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback does not support this command yet"}}' >/dev/null
+            result_json='{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback does not support this command yet"}}'
+            ;;
+        esac
+        api POST "/api/agent/v1/jobs/${job_id}/result" "${result_json}" >/dev/null
+        case "${job_type}" in
+          website_*)
+            api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null
             ;;
         esac
       fi

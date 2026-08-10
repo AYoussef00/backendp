@@ -129,7 +129,7 @@ class JobService
             ->where('status', ServerJobStatus::Running)
             ->where(function ($query) {
                 $query->whereNull('started_at')
-                    ->orWhere('started_at', '<=', now()->subMinutes(2));
+                    ->orWhere('started_at', '<=', now()->subSeconds(60));
             })
             ->update([
                 'status' => ServerJobStatus::Pending,
@@ -147,7 +147,7 @@ class JobService
             ->where('status', ServerJobStatus::Running)
             ->where(function ($query) {
                 $query->whereNull('started_at')
-                    ->orWhere('started_at', '<=', now()->subMinutes(2));
+                    ->orWhere('started_at', '<=', now()->subSeconds(60));
             })
             ->update([
                 'status' => ServerJobStatus::Failed,
