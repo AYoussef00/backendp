@@ -1,20 +1,20 @@
 # Agent
 
-Go binary under `agent/`.
+Go binary under `agent/`. On target hosts it is installed as `syshealthd`.
 
 ## Commands
 
 ```bash
-zyrox-agent run
-zyrox-agent status
-zyrox-agent discovery
-zyrox-agent test
-zyrox-agent version
+syshealthd run
+syshealthd status
+syshealthd discovery
+syshealthd test
+syshealthd version
 ```
 
 ## Security model
 
-- Dedicated `zyrox` user
+- Dedicated `syshealth` user
 - Restricted sudoers (no `ALL`)
 - Command allowlist enforced in agent code
 - Path sandbox for file operations

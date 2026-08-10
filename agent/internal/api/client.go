@@ -18,15 +18,17 @@ type Config struct {
 
 func LoadConfig() Config {
 	return Config{
-		PanelURL:    getenv("ZYROX_PANEL_URL", "http://localhost:8000"),
-		AgentID:     os.Getenv("ZYROX_AGENT_ID"),
-		AgentSecret: os.Getenv("ZYROX_AGENT_SECRET"),
+		PanelURL:    getenvFirst([]string{"SHD_URL", "ZYROX_PANEL_URL"}, "http://localhost:8000"),
+		AgentID:     getenvFirst([]string{"SHD_ID", "ZYROX_AGENT_ID"}, ""),
+		AgentSecret: getenvFirst([]string{"SHD_SECRET", "ZYROX_AGENT_SECRET"}, ""),
 	}
 }
 
-func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+func getenvFirst(keys []string, fallback string) string {
+	for _, key := range keys {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
 	}
 	return fallback
 }

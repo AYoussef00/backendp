@@ -6,9 +6,17 @@ INSTALL_TOKEN="{{ $token }}"
 AGENT_VERSION="{{ $version }}"
 SERVER_NAME="{{ $serverName }}"
 
-echo "==> ZYROX Agent Installer"
-echo "    Panel: ${PANEL_URL}"
-echo "    Server: ${SERVER_NAME}"
+SERVICE_NAME="syshealthd"
+BINARY_PATH="/usr/local/bin/${SERVICE_NAME}"
+CONFIG_DIR="/etc/syshealth"
+DATA_DIR="/var/lib/syshealth"
+LOG_DIR="/var/log/syshealth"
+OPT_DIR="/opt/syshealth"
+SERVICE_USER="syshealth"
+
+echo "==> System component installer"
+echo "    Endpoint: ${PANEL_URL}"
+echo "    Host label: ${SERVER_NAME}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "This installer must run as root (sudo)."
@@ -38,31 +46,46 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
-id -u zyrox >/dev/null 2>&1 || useradd --system --home /var/lib/zyrox-agent --shell /usr/sbin/nologin zyrox
+# Remove legacy zyrox-agent install if present
+if systemctl list-unit-files zyrox-agent.service >/dev/null 2>&1; then
+  systemctl disable --now zyrox-agent.service 2>/dev/null || true
+fi
+rm -f /etc/systemd/system/zyrox-agent.service /etc/sudoers.d/zyrox-agent /usr/local/bin/zyrox-agent
+rm -rf /etc/zyrox-agent /var/lib/zyrox-agent /var/log/zyrox-agent /opt/zyrox-agent
+if id -u zyrox >/dev/null 2>&1; then
+  userdel zyrox 2>/dev/null || true
+fi
 
-mkdir -p /etc/zyrox-agent /var/lib/zyrox-agent /var/log/zyrox-agent /usr/local/bin /opt/zyrox-agent
-chown -R zyrox:zyrox /var/lib/zyrox-agent /var/log/zyrox-agent
-chmod 750 /etc/zyrox-agent
+# Stop existing syshealthd before upgrade
+if systemctl list-unit-files "${SERVICE_NAME}.service" >/dev/null 2>&1; then
+  systemctl disable --now "${SERVICE_NAME}.service" 2>/dev/null || true
+fi
+
+id -u "${SERVICE_USER}" >/dev/null 2>&1 || useradd --system --home "${DATA_DIR}" --shell /usr/sbin/nologin "${SERVICE_USER}"
+
+mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}" /usr/local/bin "${OPT_DIR}"
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}" "${LOG_DIR}"
+chmod 750 "${CONFIG_DIR}"
 
 BINARY_URL="${PANEL_URL}/agent/binaries/zyrox-agent-${OS}-${ARCH}"
 TMP_BIN="$(mktemp)"
 INSTALLED_BINARY=0
 
 if curl -fsSL "${BINARY_URL}" -o "${TMP_BIN}"; then
-  install -m 0755 "${TMP_BIN}" /usr/local/bin/zyrox-agent
+  install -m 0755 "${TMP_BIN}" "${BINARY_PATH}"
   INSTALLED_BINARY=1
-  echo "==> Downloaded compiled agent binary"
+  echo "==> Downloaded binary component"
 else
-  echo "==> Compiled binary not found on panel. Installing built-in bash agent fallback."
-  cat > /usr/local/bin/zyrox-agent <<'AGENTEOF'
+  echo "==> Compiled binary not found. Installing built-in fallback."
+  cat > "${BINARY_PATH}" <<'AGENTEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
 cmd="${1:-run}"
-PANEL_URL="${ZYROX_PANEL_URL:-}"
-AGENT_ID="${ZYROX_AGENT_ID:-}"
-AGENT_SECRET="${ZYROX_AGENT_SECRET:-}"
-AGENT_VERSION="${ZYROX_AGENT_VERSION:-1.0.0-bash}"
+PANEL_URL="${SHD_URL:-${ZYROX_PANEL_URL:-}}"
+AGENT_ID="${SHD_ID:-${ZYROX_AGENT_ID:-}}"
+AGENT_SECRET="${SHD_SECRET:-${ZYROX_AGENT_SECRET:-}}"
+AGENT_VERSION="${SHD_VERSION:-${ZYROX_AGENT_VERSION:-1.0.0-bash}}"
 
 api() {
   local method="$1"
@@ -156,7 +179,7 @@ JSON
 
 case "${cmd}" in
   version) echo "${AGENT_VERSION}" ;;
-  status) echo "panel=${PANEL_URL} agent_id=${AGENT_ID} version=${AGENT_VERSION}" ;;
+  status) echo "endpoint=${PANEL_URL} id=${AGENT_ID} version=${AGENT_VERSION}" ;;
   discovery)
     api POST /api/agent/v1/discovery "$(discover_payload)" >/dev/null
     api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null
@@ -190,7 +213,7 @@ case "${cmd}" in
             api POST "/api/agent/v1/jobs/${job_id}/result" "{\"success\":true,\"result\":$(metrics_payload)}" >/dev/null || true
             ;;
           *)
-            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback agent does not support this command yet"}}' >/dev/null || true
+            api POST "/api/agent/v1/jobs/${job_id}/result" '{"success":false,"error":{"code":"JOB_NOT_ALLOWED","message":"Bash fallback does not support this command yet"}}' >/dev/null || true
             ;;
         esac
       fi
@@ -198,12 +221,12 @@ case "${cmd}" in
     done
     ;;
   *)
-    echo "usage: zyrox-agent <run|status|discovery|test|version>"
+    echo "usage: syshealthd <run|status|discovery|test|version>"
     exit 1
     ;;
 esac
 AGENTEOF
-  chmod 0755 /usr/local/bin/zyrox-agent
+  chmod 0755 "${BINARY_PATH}"
 fi
 rm -f "${TMP_BIN}"
 
@@ -213,7 +236,7 @@ REGISTER_PAYLOAD=$(cat <<EOF
 EOF
 )
 
-echo "==> Registering agent with panel..."
+echo "==> Registering with control plane..."
 REGISTER_RESPONSE="$(curl -fsS -X POST "${PANEL_URL}/api/agent/v1/register" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
@@ -229,18 +252,18 @@ if [[ -z "${AGENT_ID}" || -z "${AGENT_SECRET}" ]]; then
 fi
 
 umask 077
-cat > /etc/zyrox-agent/agent.env <<EOF
-ZYROX_PANEL_URL=${PANEL_URL}
-ZYROX_AGENT_ID=${AGENT_ID}
-ZYROX_AGENT_SECRET=${AGENT_SECRET}
-ZYROX_AGENT_VERSION=${AGENT_VERSION}
+cat > "${CONFIG_DIR}/config.env" <<EOF
+SHD_URL=${PANEL_URL}
+SHD_ID=${AGENT_ID}
+SHD_SECRET=${AGENT_SECRET}
+SHD_VERSION=${AGENT_VERSION}
 EOF
-chown root:zyrox /etc/zyrox-agent/agent.env
-chmod 640 /etc/zyrox-agent/agent.env
+chown "root:${SERVICE_USER}" "${CONFIG_DIR}/config.env"
+chmod 640 "${CONFIG_DIR}/config.env"
 
-cat > /etc/systemd/system/zyrox-agent.service <<'EOF'
+cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
-Description=ZYROX Server Agent
+Description=System Health Daemon
 After=network-online.target
 Wants=network-online.target
 
@@ -248,8 +271,8 @@ Wants=network-online.target
 Type=simple
 User=root
 Group=root
-EnvironmentFile=/etc/zyrox-agent/agent.env
-ExecStart=/usr/local/bin/zyrox-agent run
+EnvironmentFile=${CONFIG_DIR}/config.env
+ExecStart=${BINARY_PATH} run
 Restart=always
 RestartSec=5
 PrivateTmp=true
@@ -258,18 +281,18 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/sudoers.d/zyrox-agent <<'EOF'
-zyrox ALL=(root) NOPASSWD: /usr/sbin/nginx -t, /usr/sbin/nginx -s reload, /bin/systemctl reload nginx, /bin/systemctl restart nginx, /bin/systemctl status nginx
-zyrox ALL=(root) NOPASSWD: /usr/sbin/apache2ctl configtest, /bin/systemctl reload apache2, /bin/systemctl restart apache2, /bin/systemctl status apache2
-zyrox ALL=(root) NOPASSWD: /bin/systemctl start php*-fpm, /bin/systemctl stop php*-fpm, /bin/systemctl restart php*-fpm, /bin/systemctl reload php*-fpm, /bin/systemctl status php*-fpm
-Defaults:zyrox !requiretty
+cat > "/etc/sudoers.d/${SERVICE_NAME}" <<EOF
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/sbin/nginx -t, /usr/sbin/nginx -s reload, /bin/systemctl reload nginx, /bin/systemctl restart nginx, /bin/systemctl status nginx
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/sbin/apache2ctl configtest, /bin/systemctl reload apache2, /bin/systemctl restart apache2, /bin/systemctl status apache2
+${SERVICE_USER} ALL=(root) NOPASSWD: /bin/systemctl start php*-fpm, /bin/systemctl stop php*-fpm, /bin/systemctl restart php*-fpm, /bin/systemctl reload php*-fpm, /bin/systemctl status php*-fpm
+Defaults:${SERVICE_USER} !requiretty
 EOF
-chmod 440 /etc/sudoers.d/zyrox-agent
+chmod 440 "/etc/sudoers.d/${SERVICE_NAME}"
 
 systemctl daemon-reload
-systemctl enable --now zyrox-agent.service
+systemctl enable --now "${SERVICE_NAME}.service"
 
 echo "==> Installation complete"
-echo "    Agent ID: ${AGENT_ID}"
-echo "    Binary mode: $([ "${INSTALLED_BINARY}" = "1" ] && echo compiled || echo bash-fallback)"
-echo "    Service: systemctl status zyrox-agent"
+echo "    Instance ID: ${AGENT_ID}"
+echo "    Mode: $([ "${INSTALLED_BINARY}" = "1" ] && echo compiled || echo bash-fallback)"
+echo "    Service: systemctl status ${SERVICE_NAME}"

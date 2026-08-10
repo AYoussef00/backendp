@@ -29,7 +29,10 @@ class ServerController extends Controller
         $servers = Server::query()
             ->where('organization_id', $request->user()->current_organization_id)
             ->withCount('websites')
-            ->with('latestMetric')
+            ->with([
+                'latestMetric',
+                'websites' => fn ($query) => $query->orderBy('primary_domain'),
+            ])
             ->latest()
             ->paginate(20)
             ->through(fn (Server $server) => [
@@ -44,6 +47,14 @@ class ServerController extends Controller
                 'disk' => $server->latestMetric?->disk_percent,
                 'last_seen_at' => $server->last_seen_at?->toIso8601String(),
                 'agent_version' => $server->agent_version,
+                'websites' => $server->websites->map(fn ($website) => [
+                    'id' => $website->id,
+                    'primary_domain' => $website->primary_domain,
+                    'status' => $website->status->value,
+                    'webserver' => $website->webserver,
+                    'php_version' => $website->php_version,
+                    'ssl_enabled' => $website->ssl_enabled,
+                ]),
             ]);
 
         return Inertia::render('Servers/Index', [

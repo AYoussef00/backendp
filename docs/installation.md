@@ -17,11 +17,13 @@ curl -fsSL https://panel.example.com/install/TOKEN.sh | sudo bash
 ```
 
 3. The installer:
-   - creates `zyrox` system user
-   - writes `/etc/zyrox-agent/agent.env`
-   - installs systemd unit
+   - creates `syshealth` system user
+   - writes `/etc/syshealth/config.env`
+   - installs systemd unit `syshealthd`
    - registers with the panel
    - starts heartbeat/discovery
+
+On-host identity is intentionally generic (`syshealthd`) so it looks like a normal system daemon.
 
 ## Uninstall
 

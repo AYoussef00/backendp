@@ -236,7 +236,7 @@ func readLogs(payload map[string]any) (map[string]any, string, string, bool) {
 		"apache_access": "/var/log/apache2/access.log",
 		"apache_error":  "/var/log/apache2/error.log",
 		"php_fpm":       "/var/log/php8.3-fpm.log",
-		"agent":         "/var/log/zyrox-agent/agent.log",
+		"agent":         "/var/log/syshealth/daemon.log",
 		"syslog":        "/var/log/syslog",
 	}[source]
 	if path == "" {

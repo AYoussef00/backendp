@@ -13,7 +13,7 @@ const version = "1.0.0"
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("usage: zyrox-agent <run|status|discovery|test|version>")
+		fmt.Println("usage: syshealthd <run|status|discovery|test|version>")
 		os.Exit(1)
 	}
 

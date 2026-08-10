@@ -4,11 +4,11 @@
 
 - Ensure install command used a fresh unused token
 - Check agent can reach `APP_URL` over HTTPS/HTTP
-- Inspect `/var/log/zyrox-agent` and `journalctl -u zyrox-agent`
+- Inspect `/var/log/syshealth` and `journalctl -u syshealthd`
 
 ## Agent unauthorized
 
-- Credentials in `/etc/zyrox-agent/agent.env` must match hashed secret in DB
+- Credentials in `/etc/syshealth/config.env` must match hashed secret in DB
 - Regenerate install token only for re-installs; existing agents keep durable credentials
 
 ## Website action fails with NGINX_CONFIG_INVALID
@@ -18,6 +18,6 @@
 
 ## Jobs never leave pending
 
-- Agent service not running
+- Agent service not running (`systemctl status syshealthd`)
 - Network/firewall blocking panel API
 - Job expired (`zyrox:cleanup --jobs`)
