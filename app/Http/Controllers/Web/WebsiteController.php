@@ -240,11 +240,13 @@ class WebsiteController extends Controller
             user: $request->user(),
             server: $website->server,
             website: $website,
-            payload: ['job_uuid' => $job->uuid, 'mode' => 'agent-sync'],
+            payload: ['job_uuid' => $job->uuid, 'mode' => 'agent'],
             request: $request,
         );
 
-        $deadline = now()->addSeconds(60);
+        // Brief wait only — long blocking hits nginx 504 (proxy_read_timeout).
+        // If the agent is slow, the website page polls latest_job and toasts the result.
+        $deadline = now()->addSeconds(12);
         do {
             $job->refresh();
             if (in_array($job->status, [
@@ -269,14 +271,7 @@ class WebsiteController extends Controller
             return back()->with('error', $job->error_message ?: 'Action failed on the remote server.');
         }
 
-        $website->loadMissing('server');
-        $lastSeen = $website->server->last_seen_at;
-        $seenAgo = $lastSeen ? $lastSeen->diffForHumans() : 'never';
-
-        return back()->with(
-            'error',
-            "Remote agent did not finish in time (job {$job->status->value}). "
-            ."Server last seen {$seenAgo}. On that host run: systemctl status syshealthd && journalctl -u syshealthd -n 30 --no-pager"
-        );
+        // Still pending/running: no flash (avoids "queued" noise). UI keeps polling.
+        return back();
     }
 }

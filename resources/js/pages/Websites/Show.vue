@@ -64,12 +64,14 @@ const jobLabel = computed(() => {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 const lastNotifiedUuid = ref<string | null>(null);
+const pollStartedAt = ref<number | null>(null);
 
 function stopPolling() {
     if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
     }
+    pollStartedAt.value = null;
 }
 
 function startPolling() {
@@ -77,13 +79,26 @@ function startPolling() {
         return;
     }
 
+    pollStartedAt.value = Date.now();
+
     pollTimer = setInterval(() => {
+        if (
+            pollStartedAt.value &&
+            Date.now() - pollStartedAt.value > 90_000
+        ) {
+            stopPolling();
+            toast.error(
+                'Remote agent did not respond. Check syshealthd on that server.',
+            );
+            return;
+        }
+
         router.reload({
             only: ['website', 'latest_job', 'server'],
             preserveScroll: true,
             preserveState: true,
         });
-    }, 2000);
+    }, 1000);
 }
 
 function notifyJobResult(job: LatestJob) {
@@ -157,6 +172,16 @@ function confirmAction(action: string, path: string) {
 
     router.post(path, {}, {
         preserveScroll: true,
+        onSuccess: () => {
+            // Ensure polling starts immediately after an agent-backed action.
+            if (
+                props.latest_job &&
+                (props.latest_job.status === 'pending' ||
+                    props.latest_job.status === 'running')
+            ) {
+                startPolling();
+            }
+        },
     });
 }
 </script>
