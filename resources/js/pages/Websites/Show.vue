@@ -32,6 +32,7 @@ const props = defineProps<{
     };
     server: { id: number; name: string; status: string };
     latest_job: LatestJob | null;
+    control_mode?: string;
 }>();
 
 defineOptions({
@@ -157,7 +158,9 @@ function confirmAction(action: string, path: string) {
     router.post(path, {}, {
         preserveScroll: true,
         onSuccess: () => {
-            startPolling();
+            if ((props.control_mode ?? 'local') !== 'local') {
+                startPolling();
+            }
         },
     });
 }
