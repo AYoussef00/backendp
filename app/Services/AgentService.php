@@ -133,7 +133,13 @@ class AgentService
         $server = Server::query()->where('agent_id', $agentId)->first();
 
         if ($server === null || ! $server->verifyAgentSecret($agentSecret)) {
-            abort(401, 'AGENT_UNAUTHORIZED');
+            abort(response()->json([
+                'success' => false,
+                'error' => [
+                    'code' => 'AGENT_UNAUTHORIZED',
+                    'message' => 'Invalid agent credentials.',
+                ],
+            ], 401));
         }
 
         return $server;

@@ -123,7 +123,7 @@ class JobService
                 'error_message' => 'Job expired before the agent claimed it.',
             ]);
 
-        // Re-queue jobs left running if the agent died mid-flight.
+        // Fail jobs left running if the agent died mid-flight (do not requeue forever).
         ServerJob::query()
             ->where('server_id', $server->id)
             ->where('status', ServerJobStatus::Running)
@@ -132,10 +132,10 @@ class JobService
                     ->orWhere('started_at', '<=', now()->subSeconds(60));
             })
             ->update([
-                'status' => ServerJobStatus::Pending,
-                'started_at' => null,
-                'error_code' => null,
-                'error_message' => null,
+                'status' => ServerJobStatus::Failed,
+                'completed_at' => now(),
+                'error_code' => 'OPERATION_FAILED',
+                'error_message' => 'Agent claimed the job but never reported a result.',
             ]);
     }
 

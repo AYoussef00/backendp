@@ -106,14 +106,14 @@ api() {
   local tmp response code
   tmp="$(mktemp)"
   if [[ -n "${data}" ]]; then
-    code="$(curl -sS -o "${tmp}" -w '%{http_code}' -X "${method}" "${PANEL_URL}${path}" \
+    code="$(curl -sS --connect-timeout 5 --max-time 30 -o "${tmp}" -w '%{http_code}' -X "${method}" "${PANEL_URL}${path}" \
       -H "Content-Type: application/json" \
       -H "Accept: application/json" \
       -H "X-Agent-Id: ${AGENT_ID}" \
       -H "X-Agent-Secret: ${AGENT_SECRET}" \
       -d "${data}" 2>/dev/null || echo 000)"
   else
-    code="$(curl -sS -o "${tmp}" -w '%{http_code}' -X "${method}" "${PANEL_URL}${path}" \
+    code="$(curl -sS --connect-timeout 5 --max-time 30 -o "${tmp}" -w '%{http_code}' -X "${method}" "${PANEL_URL}${path}" \
       -H "Accept: application/json" \
       -H "X-Agent-Id: ${AGENT_ID}" \
       -H "X-Agent-Secret: ${AGENT_SECRET}" 2>/dev/null || echo 000)"
@@ -159,7 +159,7 @@ JSON
 }
 
 discover_websites() {
-  python3 - <<'PY' 2>/dev/null || echo '{"websites":[]}'
+  timeout 20 python3 - <<'PY' 2>/dev/null || echo '{"websites":[]}'
 import json, os, re, glob
 sites=[]
 for path in glob.glob('/etc/nginx/sites-enabled/*') + glob.glob('/etc/apache2/sites-enabled/*'):
@@ -366,15 +366,19 @@ case "${cmd}" in
     ;;
   run)
     log "syshealthd starting panel=${PANEL_URL} agent_id=${AGENT_ID}"
-    api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null || true
-    api POST /api/agent/v1/discovery "$(discover_payload)" >/dev/null || true
-    api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || true
+    # Never block the main loop on startup probes.
+    api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null || log "startup heartbeat failed"
+    ( api POST /api/agent/v1/discovery "$(discover_payload)" >/dev/null || log "startup discovery failed" ) &
+    ( api POST /api/agent/v1/websites "$(discover_websites)" >/dev/null || log "startup websites failed" ) &
     loop=0
     while true; do
       set +e
       loop=$((loop + 1))
       if (( loop % 2 == 1 )); then
         api POST /api/agent/v1/heartbeat "{\"hostname\":\"$(hostname_val)\",\"agent_version\":\"${AGENT_VERSION}\"}" >/dev/null
+      fi
+      if (( loop % 10 == 0 )); then
+        log "alive loop=${loop}"
       fi
       if (( loop % 6 == 0 )); then
         api POST /api/agent/v1/metrics "$(metrics_payload)" >/dev/null
@@ -448,24 +452,56 @@ REGISTER_RESPONSE="$(curl -fsS -X POST "${PANEL_URL}/api/agent/v1/register" \
   -H "Accept: application/json" \
   -d "${REGISTER_PAYLOAD}")"
 
-AGENT_ID="$(printf '%s' "${REGISTER_RESPONSE}" | sed -n 's/.*"agent_id":"\([^"]*\)".*/\1/p')"
-AGENT_SECRET="$(printf '%s' "${REGISTER_RESPONSE}" | sed -n 's/.*"agent_secret":"\([^"]*\)".*/\1/p')"
+eval "$(REGISTER_RESPONSE="${REGISTER_RESPONSE}" python3 - <<'PY'
+import json, os, shlex
+raw = os.environ.get("REGISTER_RESPONSE") or "{}"
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f'echo "Invalid registration JSON: {exc}" >&2; exit 1')
+    raise SystemExit
+payload = data.get("data") or {}
+agent_id = payload.get("agent_id") or ""
+agent_secret = payload.get("agent_secret") or ""
+if not agent_id or not agent_secret:
+    print('echo "Registration failed: missing agent credentials" >&2; exit 1')
+    raise SystemExit
+print(f"AGENT_ID={shlex.quote(agent_id)}")
+print(f"AGENT_SECRET={shlex.quote(agent_secret)}")
+PY
+)"
 
-if [[ -z "${AGENT_ID}" || -z "${AGENT_SECRET}" ]]; then
+if [[ -z "${AGENT_ID:-}" || -z "${AGENT_SECRET:-}" ]]; then
   echo "Registration failed:"
   echo "${REGISTER_RESPONSE}"
   exit 1
 fi
 
 umask 077
-cat > "${CONFIG_DIR}/config.env" <<EOF
-SHD_URL=${PANEL_URL}
-SHD_ID=${AGENT_ID}
-SHD_SECRET=${AGENT_SECRET}
-SHD_VERSION=${AGENT_VERSION}
-EOF
+printf 'SHD_URL=%s\nSHD_ID=%s\nSHD_SECRET=%s\nSHD_VERSION=%s\n' \
+  "${PANEL_URL}" "${AGENT_ID}" "${AGENT_SECRET}" "${AGENT_VERSION}" \
+  > "${CONFIG_DIR}/config.env"
 chown "root:${SERVICE_USER}" "${CONFIG_DIR}/config.env"
 chmod 640 "${CONFIG_DIR}/config.env"
+
+# Verify credentials work before enabling the service.
+AUTH_CODE="$(curl -sS -o /tmp/zyrox-auth-check.json -w '%{http_code}' \
+  -X POST "${PANEL_URL}/api/agent/v1/heartbeat" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -H "X-Agent-Id: ${AGENT_ID}" \
+  -H "X-Agent-Secret: ${AGENT_SECRET}" \
+  -d "{\"hostname\":\"${HOSTNAME_VAL}\",\"agent_version\":\"${AGENT_VERSION}\"}" || echo 000)"
+if [[ "${AUTH_CODE}" != 2* ]]; then
+  echo "Credential verification failed (HTTP ${AUTH_CODE}):"
+  cat /tmp/zyrox-auth-check.json 2>/dev/null || true
+  echo
+  echo "Registration response was:"
+  echo "${REGISTER_RESPONSE}"
+  exit 1
+fi
+rm -f /tmp/zyrox-auth-check.json
+echo "==> Credentials verified"
 
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
